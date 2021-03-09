@@ -4,7 +4,7 @@ import logging
 from re import escape
 from typing import OrderedDict
 
-from config.custom_components.custom_event_handler.eventMessage import (
+from eventMessage import (
     EntityActionMessage,
     EntityMessage,
     EventMessage,
