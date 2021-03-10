@@ -4,7 +4,7 @@ import logging
 from re import escape
 from typing import OrderedDict
 
-from eventMessage import (
+from .eventMessage import (
     EntityActionMessage,
     EntityMessage,
     EventMessage,
@@ -14,7 +14,7 @@ from eventMessage import (
 
 _LOGGER = logging.getLogger(__name__)
 
-DOMAIN = "custom_event_handler"
+DOMAIN = "ha-custom-events"
 
 SYSTEMCODE_ENTITY = "input_text.system_code"
 
