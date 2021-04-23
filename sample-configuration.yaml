@@ -1,0 +1,49 @@
+ha-custom-events:
+  events:
+    - event: HA_STARTUP_COMPLETE
+      platform: HASSIO_EVENT
+      type: listener
+      callback:
+        - event: HAKAFKA_CONSUMER_START
+        - event: HAKAFKA_PRODUCER_START
+    - event: HA_SHUTDOWN_REQUEST
+      platform: HASSIO_EVENT
+      type: listener
+      callback:
+        - event: HAKAFKA_CONSUMER_STOP
+        - event: HAKAFKA_PRODUCER_STOP
+    - event: HAKAFKA_CONSUMER_START
+      platform: HAKAFKA
+      type: dispatcher
+    - event: HAKAFKA_PRODUCER_START
+      platform: HAKAFKA
+      type: dispatcher
+    - event: HAKAFKA_CONSUMER_STOP
+      platform: HAKAFKA
+      type: dispatcher
+    - event: HAKAFKA_PRODUCER_STOP
+      platform: HAKAFKA
+      type: dispatcher
+    ###### foreign event it's mapped here
+    - event: INBOUND_EVENT
+      platform: HASSIO_EVENT
+      type: listener
+      ###### callback on foreign event as 'response'
+      callback:
+        - event: HAKAFKA_PRODUCER_PRODUCE
+          topic: "HASSIO"
+    - event: HAKAFKA_PRODUCER_PRODUCE
+      platform: HAKAFKA
+      type: dispatcher
+  targets:
+    - target: someEntity
+      events:
+        - event: ALERT
+          message: a message
+          callback:
+            - event: HAKAFKA_PRODUCER_PRODUCE
+              topic: "HASSIO"
+              data:
+                - platform: HASSIO_EVENT
+                  label: "a event label"
+                  event: eventToFire

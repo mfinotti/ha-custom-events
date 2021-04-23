@@ -1,5 +1,6 @@
 {
     "domain": "ha-custom-events",
+    "version": "20210401",
     "name": "Middleware that handle custom events",
     "documentation": "http://todo",
     "codeowners": ["@mfinotti"]

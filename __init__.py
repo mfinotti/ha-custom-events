@@ -1,16 +1,6 @@
 from enum import Enum
 from json import dump, dumps, loads
 import logging
-from re import escape
-from typing import OrderedDict
-
-from .eventMessage import (
-    EntityActionMessage,
-    EntityMessage,
-    EventMessage,
-    EventTypeEnum,
-    PlatformEnum,
-)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,222 +9,343 @@ DOMAIN = "ha-custom-events"
 SYSTEMCODE_ENTITY = "input_text.system_code"
 
 
-class CustomEventEnum(Enum):
-    TOOUTBOUND_EVENT = "TO_OUTBOUND_EVENT"
-    OUTBOUND_EVENT = "OUTBOUND_EVENT"
-    INBOUND_EVENT = "INBOUND_EVENT"
-
-
 async def async_setup(hass, config):
 
     conf = config[DOMAIN]
 
-    if len(conf["entities"]) > 0:
-        _LOGGER.info("configuration loaded. %s", conf["entities"])
+    if len(conf["events"]) > 0:
+        _LOGGER.info("HA-Custom-events events configuration found.")
+        _LOGGER.debug("events configuration %s", conf["events"])
     else:
-        _LOGGER.warn("Any entity has provided in the configuration.")
+        _LOGGER.warn("HA-Custom-events any 'EVENTS' has provided in the configuration.")
 
-    ceh = CustomEventHandler(hass, conf["entities"])
-    hass.bus.async_listen(CustomEventEnum.TOOUTBOUND_EVENT.value, ceh.outboundEvent)
-    hass.bus.async_listen(CustomEventEnum.INBOUND_EVENT.value, ceh.inboundEvent)
+    if len(conf["targets"]) > 0:
+        _LOGGER.info("HA-Custom-events target configuration found.")
+        _LOGGER.debug("targets configuration %s", conf["targets"])
+    else:
+        _LOGGER.warn("HA-Custom-events any 'TARGETS' has provided in the configuration.")
+
+    ceh = CustomEventHandler(hass, conf["events"], conf['targets'])
 
     return True
 
-
 class CustomEventHandler:
-    def __init__(self, hass, entities):
+
+    def __init__(
+        self,
+        hass,
+        events,
+        targets):
         """Initialize."""
-        self._hass = hass
-        self._entities = loads(dumps(entities))
+        self._hass      = hass
+        self.event      = {}     # events address book
+        self.target     = {}    # targets address book
 
-    async def inboundEvent(self, event):
+        eventConfiguration  = loads(dumps(events))
+        targetConfiguration = loads(dumps(targets))
 
-        if event.data != "":
-            try:
-                _LOGGER.debug("event data: %s", event.data)
-                eventMessage = self.parseEvent(event.data)
+        # setting up event own component
+        self._hass.bus.async_listen("HA_EVENT", self.executeHAEvent)
+        _LOGGER.debug("listing on system event: %s \n Fire HA_EVENT everytime you want invoke the ha-custom-events integration","HA_EVENT")
 
-                self._processEventMessage(eventMessage)
-            except Exception as e:
-                _LOGGER.error("error in handling inbount event Exception: %s", e)
+        for econf in eventConfiguration:
+            self.buildEventByConf(econf)
 
-        return
+        for tconf in targetConfiguration:
+            self.target[tconf['target']] = tconf
 
-    async def outboundEvent(self, event):
 
-        _LOGGER.debug("To OutBound Event Message: %s", event.data)
+    def buildEventByConf(self, econf):
 
-        systemCodeEntityState = self._hass.states.get(SYSTEMCODE_ENTITY)
-        if systemCodeEntityState == None:
-            _LOGGER.error("SYSTEM CODE NOT VALID!!!! %s", systemCodeEntityState)
+        e       = econf['event']
+        etype   = econf['type']
+
+        if "listener" == etype:
+            self._hass.bus.async_listen(e, self.onEvent)
+            _LOGGER.debug("listing on system event: %s",e)
+
+        self.event[e] = econf
+
+
+    def executeHAEvent(self, event):
+        if "event" not in event.data and "target" not in event.data:
+            _LOGGER.warn("HA-Event not recognized. Please use the standard form: \n [event: Event to fire / target: if the event references one of the 'targets' specified in configuration, data: (Optional) Event data passed. type: (Optional) the type of the target event]")
             return
 
-        if "type" not in event.data or "entityId" not in event.data:
-            _LOGGER.error("Invalid event provided: %s", event.data)
-            return
+        eventToFire = event.data['event'] if 'event' in event.data else None
+        eventData   = event.data['data'] if 'data' in event.data else None
+        eventTarget = event.data['target'] if 'target' in event.data else None
+        eventMessage= event.data['message'] if 'message' in event.data else ""
+        eventTargetThreshold   = event.data['threshold'] if 'threshold' in event.data else None
 
-        entityState = self._hass.states.get(event.data["entityId"])
 
-        messageString = None
-        if "message" in event.data:
-            messageString = event.data["message"]
+        if None != eventTarget and "" != eventTarget:
+            targetData = {}
 
-        eventMessage = EventMessage(
-            {
-                "eventType": event.data["type"],
-                "message": messageString,
-                "platform": PlatformEnum.EVENT.value,
-                "systemCode": systemCodeEntityState.state,
-                "entity": [
-                    {
-                        "entityId": event.data["entityId"],
-                        "state": entityState.state,
-                        "label": entityState.attributes["friendly_name"],
-                    }
-                ],
-            }
-        )
+            targetConf  = self.target[eventTarget]
+            targetData['target'] = self.getTargetCurrentState(targetConf['target'])
 
-        self._processEventMessage(eventMessage)
+            for threshold in filter(lambda x : x['event'] == eventTargetThreshold, targetConf['events']):
+                _LOGGER.debug("Target threshold found. target: %s, threshold: %s", eventTarget, threshold)
 
-    def parseEvent(self, eventData):
-        eventMessage = None
+                eventLevel      = threshold['event']
+                eventMessage    += " - "+threshold['message'] if "message" in threshold else ""
+
+                # getting threeshold callback
+                callbacks = self.getEventCallback(threshold)
+
+                self.handleEventCallback(targetData, callbacks, eventLevel, eventMessage)
+        else:
+            _LOGGER.debug("firing Event %s with data %s", eventToFire, eventData)
+            self._hass.bus.fire(eventToFire,eventData)
+
+
+    def onEvent(self, event):
+
+        eventName   = event.event_type
+        eventData   = event.data
+
+        _LOGGER.info("Catched event %s with data: %s", eventName, eventData)
+
+        currentEvent = self.event[eventName]
+        if not currentEvent :
+            raise Exception("Event [%s] not found. ", eventName)
+
+        targetData = {}
+        message     = eventData['message'] if 'message' in eventData else None
+        sender      = eventData['sender'] if 'sender' in eventData else None
+        eventDataAtrributes = None
+
+
+        if "platform" in eventData :
+            targetData['target'] = self._getEventDataByPlatform(eventData['platform'], eventData)
+        else:
+            targetData['target'] = self._getEventDataByPlatform(currentEvent['platform'], eventData)
+
+        if sender :
+            targetData['sender'] = sender
+
+        # getting threeshold callback
+        callbacks = self.getEventCallback(currentEvent)
+
+        self.handleEventCallback(targetData, callbacks, "NOTICE" , message)
+
+
+    def _getEventDataByPlatform(self, platform, eventData, eventDataAttributes = None, eventLevel = "NOTICE", eventMessage = ""):
+
+        switcher = {
+            'HASSIO_EVENT'  : '_processEventDataEVENT',
+            'HASSIO_STATE'  : '_processEventDataGENERIC',
+            'HAKAFKA'       : '_processEventDataHAKAFKA'
+        }
 
         try:
-            eventMessage = EventMessage(eventData)
-        except:
-            _LOGGER.error("Error parsing message: %s", eventData)
+            methodName = switcher.get(platform)
+            _LOGGER.debug("found process method %s for plaform %s", methodName, platform)
+            method = getattr(self, methodName)
 
-        return eventMessage
+            return method(eventData, eventDataAttributes, eventLevel, eventMessage)
 
-    def _processEventMessage(self, eventMessage: EventMessage):
+        except Exception as e:
+            _LOGGER.debug(e)
+            _LOGGER.warn("No function found for the plarform: %s! falling back to GENERIC", platform)
+            return self._processEventDataGENERIC(eventData, eventDataAttributes)
 
-        # detect event type
-        if eventMessage.getEventType() == EventTypeEnum.REQUEST.value:
-            return self._processEventTypeRequest(eventMessage)
-        elif eventMessage.getEventType() == EventTypeEnum.NOTICE.value:
-            return self._processEventTypeNotice(eventMessage)
-        elif eventMessage.getEventType() == EventTypeEnum.ALERT.value:
-            # return self._processEventTypeAlert(eventMessage) BYPASS
-            return self._processEventTypeNotice(eventMessage)
 
-        return None
+    def _processEventDataHAKAFKA(self, eventData = {}, eventDataAttributes = None, eventLevel = "NOTICE", eventMessage = ""):
 
-    def _processEventTypeRequest(self, eventMessage: EventMessage):
-
-        responseMessage = EventMessage()
-        responseMessage.sender = eventMessage.getSender()
-        responseMessage.message = "RESPONSE"
-        responseMessage.eventType = EventTypeEnum.NOTICE.value
-        responseMessage.systemCode = eventMessage.getSystemCode()
-        responseMessage.platform = eventMessage.getPlatform()
-        responseMessage.entity = []
-
-        if eventMessage.getPlatform() == PlatformEnum.STATE.value:
-            if len(eventMessage.getEntity()) > 0:
-                for e in eventMessage.getEntity():
-                    eState = self._hass.states.get(e.getEntityId())
-
-                    currentEntityMessage = EntityMessage()
-                    currentEntityMessage.entityId = e.getEntityId()
-                    currentEntityMessage.label = eState.attributes["friendly_name"]
-                    currentEntityMessage.state = eState.state
-
-                    responseMessage.getEntity().append(currentEntityMessage)
-            else:
-                responseMessage = None
-        elif eventMessage.getPlatform() == PlatformEnum.EVENT.value:
-            self._hass.bus.fire(
-                eventMessage.getEntity()[0].getEntityId()
-            )
-            responseMessage.message = "Richiesta ricevuta, ed eseguita."
-
-        """ Dispatching OUTBOUND event """
-        if None != responseMessage:
-            jsonMessage = self.toDict(responseMessage)
-            self._hass.bus.fire(
-                CustomEventEnum.OUTBOUND_EVENT.value,
-                dumps(jsonMessage),
-            )
-
-    def _processEventTypeNotice(self, eventMessage: EventMessage):
-        eventMessage2 = self.__processEvent(eventMessage)
-
-        _LOGGER.debug("Notice Event Message: %s", eventMessage)
         try:
-            jsonMessage = self.toDict(eventMessage2)
-            _LOGGER.debug("messageEvent: %s", jsonMessage)
+            message                         = {}
+            message['message']              = {}
+            message['message']["eventType"] = eventLevel
+            message['message']["message"]   = eventMessage
+            message['message']["systemCode"]= self.systemCode
+            message['message']["platform"]  = "HASSIO_EVENT"
 
-            self._hass.bus.fire(
-                CustomEventEnum.OUTBOUND_EVENT.value,
-                dumps(jsonMessage),
-            )
+            if eventData:
+                if 'sender' in eventData:
+                    message['message']['sender'] = eventData['sender']
+                    del eventData["sender"]
+
+                if 'topic' in eventData:
+                    message["topic"] = eventData['topic']
+                    del eventData['topic']
+
+                if isinstance(eventData['target'], list) :
+                    message['message']['target'] = eventData['target']
+                else:
+                    message['message']['target'] = list(eventData['target'])
+
+            if eventDataAttributes:
+                message['message']['command'] = eventDataAttributes
+
+            return message
+
+        except Exception as e:
+            _LOGGER.warn("eventData: %s", eventData)
+            _LOGGER.error(e)
+
+
+    def _processEventDataGENERIC(self, eventData, eventDataAttributes = None, eventLevel = "NOTICE", eventMessage = ""):
+
+        data = []
+        if 'target' in eventData:
+            if 'targetId' in eventData['target']:
+                if isinstance(eventData['target']['targetId'], list): #only for internal purpose
+                    for target in eventData['target']['targetId']:
+                        data.extend(self.getTargetCurrentState(target, True))
+                else:
+                    data.extend(self.getTargetCurrentState(eventData['target']['targetId']))
+
+        return data
+
+
+    def _processEventDataEVENT(self, eventData, eventDataAttributes = None, eventLevel = "NOTICE", eventMessage = ""):
+
+        if 'target' in eventData:
+            if 'targetId' in eventData['target']:
+                _LOGGER.info("Firing HASSIO event [%s]", eventData['target']['targetId'])
+                self._hass.bus.fire(eventData['target']['targetId'], eventData)
+
+                dataToReturn = []
+                dataToReturn.append({"targetId" : eventData['target']['targetId']})
+
+                return dataToReturn
+
+        return {}
+
+
+    def handleEventCallback(self, targetData, callbacks,  eventLevel = "NOTICE", eventMessage = ""):
+
+        if not hasattr(self, "systemCode"):
+            self.systemCode = self._hass.states.get(SYSTEMCODE_ENTITY).state
+            _LOGGER.info("Setting up the System code: %s", self.systemCode)
+
+        try:
+            _LOGGER.debug("Found %s callbacks for the given event", len(callbacks))
+            for callback in callbacks:
+                cevent      = callback['event']
+
+                ctype           = None
+                cplatform       = None
+                cdata           = None
+                cDataAttributes = None
+
+                # finding the given event in the address book..
+                if cevent in self.event:
+                    # event found in the address book then retrieve the event type
+                    ctype       = self.event[cevent]['type']
+                    cplatform   = self.event[cevent]['platform']
+                else:
+                    _LOGGER.warn("Event %s not found in the address book. Falling back to into type [dispatcher]", cevent)
+                    ctype = "dispatcher"
+
+                if "data" in callback:
+                    cDataAttributes = self.getAdditionalAttributesFromData(callback['data']) # get optional callback event data
+
+                if "topic" in callback:
+                    _LOGGER.debug("found topic in callback properties..Injecting in main event data..")
+                    targetData['topic'] = callback['topic']
+
+                ###### HANDLE EVENT BY HIS OWN TYPE
+                cdata = self._getEventDataByPlatform(cplatform, targetData, cDataAttributes, eventLevel, eventMessage)
+
+                if "dispatcher" == ctype:
+                    _LOGGER.debug("Firing callback event %s with data %s", cevent, cdata)
+                    self._hass.bus.fire(
+                        cevent,
+                        cdata,
+                    )
+                else:
+                    _LOGGER.debug("listening on event: %s",cevent)
+                    self._hass.bus.async_listen(cevent, self.executeCallbackOnEvent)
+
         except Exception as e:
             _LOGGER.error(e)
 
-        return eventMessage
 
-    def _processEventTypeAlert(self, eventMessage: EventMessage):
-        eventMessage = self.__processEvent(eventMessage)
+    def getAdditionalAttributesFromData(self, data):
+        attributes = []
 
-        _LOGGER.info("Notice Event Message: %s", eventMessage)
-        return eventMessage
+        _LOGGER.debug("getAdditionalAttributesFromData data: [%s]", data)
+        if isinstance(data, list):
+            for eventData in data:
+                # check if the event exists in the configuration
+                eventToAdd = self._getEventConfigurationByData(eventData)
 
-    def __processEvent(self, eventMessage: EventMessage):
+                attributes.append(eventToAdd)
+        elif "event" in data:
+            eventToAdd = self._getEventConfigurationByData(data)
 
-        if len(eventMessage.getEntity()) > 0:
-            for entity in eventMessage.getEntity():
-                entity: EntityMessage
-                entityId = entity.getEntityId()
-                try:
-                    # entityConf =
-                    entityEventActions = self.__getActionsByEntityEvent(
-                        entityId, eventMessage.getEventType()
-                    )
-                    if entityEventActions and len(entityEventActions) > 0:
-                        entityActions = []
-                        for action in entityEventActions:
-                            entityActions.append(EntityActionMessage(action))
+            attributes.append(eventToAdd)
+        else:
+            attributes.append(data)
 
-                        entity.actions = entityActions
-                except Exception as e:
-                    _LOGGER.info("Error: %s", e)
+        _LOGGER.debug("getAdditionalAttributesFromData attribues: [%s]", attributes)
 
-        return eventMessage
+        return attributes
 
-    def __getActionsByEntityEvent(self, entityId, eventType):
 
-        entityConf = None
-        eventActions = None
-        for config in self._entities:
-            try:
-                entityConf = config[entityId]
-                break
-            except Exception as e:
-                continue
+    def _getEventConfigurationByData(self, data):
 
-        if entityConf:
-            for eventConf in entityConf:
-                try:
-                    eventActions = eventConf[eventType]
-                    break
-                except Exception as e:
-                    continue
+        eventConfiguration = data
+        try:
+            eventConfiguration =  self.event[data['event']]
+        except Exception as e:
+            _LOGGER.warn("Event not found in configuration [%s]", data )
 
-        return eventActions["actions"]
+        return eventConfiguration
 
-    def toDict(self, obj):
-        if not hasattr(obj, "__dict__"):
-            return obj
-        result = {}
-        for key, val in obj.__dict__.items():
-            if key.startswith("_"):
-                continue
-            element = []
-            if isinstance(val, list):
-                for item in val:
-                    element.append(self.toDict(item))
-            else:
-                element = self.toDict(val)
-            result[key] = element
-        return result
+
+    def getEventCallback(self, event):
+
+        if not event:
+            raise Exception("The given event not exists [%s]", event['event'])
+
+        if "callback" in event and len(event["callback"]) > 0:
+            return event['callback']
+        else:
+            return []
+
+
+    def getTargetCurrentState(self, target, includeGroups = False):
+
+        data = []
+        if "group." in target:
+            groupMetadata = self._hass.states.get(target)
+            if groupMetadata:
+
+                if includeGroups:
+                    data.append(self._hassioGroupMetadata(groupMetadata))
+
+                for entity in groupMetadata.attributes['entity_id']:
+                    data.append(self._hassioEntityState(entity))
+        else:
+           data.append(self._hassioEntityState(target))
+
+
+        _LOGGER.debug("target [%s] entity state: %s ", target, data)
+
+        return data
+
+    def _hassioEntityState(self, entityId):
+
+        targetState             = self._hass.states.get(entityId)
+        _LOGGER.debug("entity: [%s] state: [%s]", entityId, targetState)
+
+        targetDict              = {}
+        targetDict['state']     = targetState.state
+        targetDict['targetId']  = targetState.entity_id
+        targetDict['domain']    = targetState.domain
+        targetDict['label']     = targetState.name
+
+        return targetDict
+
+    def _hassioGroupMetadata(self, group):
+
+        metadata                = {}
+        metadata['targetId']    = group.attributes['entity_id']
+        metadata['domain']      = "group"
+        metadata['label']       = group.attributes['friendly_name']
+
+        return metadata
