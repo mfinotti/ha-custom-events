@@ -88,7 +88,7 @@ class CustomEventHandler:
             for threshold in filter(lambda x : x['event'] == eventTargetThreshold, targetConf['events']):
                 _LOGGER.debug("Target threshold found. target: %s, threshold: %s", eventTarget, threshold)
 
-                eventLevel      = threshold['event']
+                eventLevel      = threshold['level'] if "level" in threshold else threshold['event']
                 eventMessage    += " - "+threshold['message'] if "message" in threshold else ""
 
                 # getting threeshold callback
