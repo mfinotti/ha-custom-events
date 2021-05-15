@@ -8,6 +8,7 @@ DOMAIN = "ha-custom-events"
 
 SYSTEMCODE_ENTITY = "input_text.system_code"
 
+SCRIPTS_TARGET = "scripts.ececution"
 
 async def async_setup(hass, config):
 
@@ -48,6 +49,9 @@ class CustomEventHandler:
         self._hass.bus.async_listen("HA_EVENT", self.executeHAEvent)
         _LOGGER.debug("listing on system event: %s \n Fire HA_EVENT everytime you want invoke the ha-custom-events integration","HA_EVENT")
 
+        self._hass.bus.async_listen("HA_SCRIPT_EVENT", self.executeHAEventOnScritptReturn)
+        _LOGGER.debug("listing on system event: %s \n Fire HA_SCRIPT_EVENT everytime you want invoke the ha-custom-events integration","HA_SCRIPT_EVENT")
+
         for econf in eventConfiguration:
             self.buildEventByConf(econf)
 
@@ -66,7 +70,33 @@ class CustomEventHandler:
 
         self.event[e] = econf
 
+    def executeHAEventOnScritptReturn(self, event):
 
+        _LOGGER.debug("Catched event %s with data %s", "HA_SCRIPT_EVENT", event.data)
+        if "id" not in event.data['payload'] and "data" not in event.data['payload']:
+            _LOGGER.warn("HA-Script-Event not recognized. Please use the standard form: \n [id: if the event references one of the 'targets' specified in configuration, data: (Optional) Event data passed.")
+            return
+
+        eventData               = event.data['payload']['data']
+        eventId                 = event.data['payload']['id']
+        #injecting eventData into message data 
+        messageData             = {}
+        messageData['target']    = eventData
+
+        scriptExecutionConf     = self.target[SCRIPTS_TARGET]
+        
+        if None != scriptExecutionConf and "" != scriptExecutionConf:
+            for event in filter(lambda x : x['event'] == eventId, scriptExecutionConf['events']):
+                _LOGGER.debug("Target event found. target: %s, event: %s", SCRIPTS_TARGET, eventId)
+
+                # getting threeshold callback
+                callbacks       = self.getEventCallback(event)
+
+                self.handleEventCallback(messageData, callbacks)
+        else:
+            _LOGGER.warn("SCRIPT TARGET not configured! Please add [%s] under 'target' configuration collection", SCRIPTS_TARGET)
+
+        
     def executeHAEvent(self, event):
         if "event" not in event.data and "target" not in event.data:
             _LOGGER.warn("HA-Event not recognized. Please use the standard form: \n [event: Event to fire / target: if the event references one of the 'targets' specified in configuration, data: (Optional) Event data passed. type: (Optional) the type of the target event]")
