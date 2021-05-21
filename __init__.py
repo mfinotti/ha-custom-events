@@ -77,8 +77,9 @@ class CustomEventHandler:
             _LOGGER.warn("HA-Script-Event not recognized. Please use the standard form: \n [id: if the event references one of the 'targets' specified in configuration, data: (Optional) Event data passed.")
             return
 
-        eventData               = event.data['payload']['data']
-        eventId                 = event.data['payload']['id']
+        payload                 = event.data['payload']
+        eventData               = payload['data']
+        eventId                 = payload['id']
         #injecting eventData into message data 
         messageData             = {}
         messageData['target']    = eventData
