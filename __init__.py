@@ -412,9 +412,13 @@ class CustomEventHandler:
                     data.append(self._hassioGroupMetadata(groupMetadata))
 
                 for entity in groupMetadata.attributes["entity_id"]:
-                    data.append(self._hassioEntityState(entity))
+                    currentEntityState = self._hassioEntityState(entity)
+                    if None != currentEntityState: 
+                        data.append(currentEntityState)
         else:
-            data.append(self._hassioEntityState(target))
+            currentEntityState = self._hassioEntityState(target)
+            if None != currentEntityState: 
+                data.append(currentEntityState)
 
         _LOGGER.debug("target [%s] entity state: %s ", target, data)
 
@@ -425,11 +429,18 @@ class CustomEventHandler:
         targetState = self._hass.states.get(entityId)
         _LOGGER.debug("entity: [%s] state: [%s]", entityId, targetState)
 
+        if None == targetState:
+            return None
+
         targetDict = {}
-        targetDict["state"] = targetState.state
         targetDict["targetId"] = targetState.entity_id
         targetDict["domain"] = targetState.domain
-        targetDict["label"] = targetState.name
+        targetDict["label"] = targetState.attributes["friendly_name"]
+
+        if "unit_of_measurement" in targetState.attributes:
+            targetDict["state"] = targetState.state+" "+ targetState.attributes["unit_of_measurement"]
+        else:
+            targetDict["state"] = targetState.state
 
         return targetDict
 
