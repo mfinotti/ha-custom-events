@@ -1,5 +1,4 @@
-from enum import Enum
-from json import dump, dumps, loads
+from json import dumps, loads
 import logging
 
 _LOGGER = logging.getLogger(__name__)
