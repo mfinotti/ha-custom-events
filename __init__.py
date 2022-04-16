@@ -434,7 +434,10 @@ class CustomEventHandler:
         targetDict = {}
         targetDict["targetId"] = targetState.entity_id
         targetDict["domain"] = targetState.domain
-        targetDict["label"] = targetState.attributes["friendly_name"]
+        if "friendly_name" in targetState.attributes:
+            targetDict["label"] = targetState.attributes["friendly_name"]
+        else:
+            targetDict["label"] = targetState.name 
 
         if "unit_of_measurement" in targetState.attributes:
             targetDict["state"] = targetState.state+" "+ targetState.attributes["unit_of_measurement"]
